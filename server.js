@@ -3,7 +3,7 @@ const cors = require('cors');
 const mysql = require('mysql2');
 const app = express();
 const port = 5000;
-
+const bcrypt = require('bcrypt'); // Pour le hachage des mots de passe
 app.use(cors());
 app.use(express.json());
 
@@ -134,7 +134,7 @@ app.post('/api/soins', (req, res) => {
       });
     });
   });
-  // NOUVELLE ROUTE POUR LA CONSULTATION DES TRANSACTIONS
+  /*// NOUVELLE ROUTE POUR LA CONSULTATION DES TRANSACTIONS
 app.get('/api/transactions', async (req, res) => {
   const filterDate = req.query.date; // Récupère le paramètre 'date' de l'URL
 
@@ -204,6 +204,86 @@ app.get('/api/transactions', async (req, res) => {
     console.error('Erreur lors de la récupération des transactions combinées:', err);
     res.status(500).json({ message: 'Erreur serveur lors de la récupération des transactions.' });
   }
+});*/
+// VOTRE ROUTE /api/transactions MODIFIÉE POUR ACCEPTER LE FILTRE code_siege
+app.get('/api/transactions', async (req, res) => {
+  const filterDate = req.query.date;
+  const filterCodeSiege = req.query.codeSiege; // <-- NOUVEAU: Récupérer le code_siege du client
+
+  let whereClauses = []; // Pour construire dynamiquement la clause WHERE
+  const params = [];      // Pour les paramètres bindés (sécurité contre injections SQL)
+
+  if (filterDate) {
+    whereClauses.push(`DATE(date) = ?`); // Utiliser DATE() pour comparer juste la date
+    params.push(filterDate);
+  }
+
+  if (filterCodeSiege) { // <-- NOUVEAU: Ajouter le filtre code_siege si fourni
+    whereClauses.push(`code_siege = ?`);
+    params.push(filterCodeSiege);
+  }
+
+  let whereString = '';
+  if (whereClauses.length > 0) {
+    whereString = ` WHERE ${whereClauses.join(' AND ')}`; // Joindre les conditions avec AND
+  }
+
+  try {
+    // Note: Utilisation de 'db.execute' avec les paramètres bindés
+    const [allocations] = await rawDb.execute(`
+        SELECT
+         id,
+         'Allocation Touristique' AS type,
+         date ,
+         nom,
+         prenom,
+         devise AS devise,
+         totalEnDinars AS montant_da,
+         numPasseport AS reference,
+         code_siege
+        FROM allocations_touristiques
+        ${whereString}
+    `, params); // Passer les paramètres ici
+
+    const [fraisMissions] = await rawDb.execute(`
+        SELECT
+         id,
+         'Frais de Missions' AS type,
+         date AS date,
+         nom AS nom,
+         prenom AS prenom,
+         devise AS devise,
+         totalEnDinars AS montant_da,
+         numPasseport AS reference,
+         code_siege
+        FROM frais_de_missions
+        ${whereString}
+    `, params); // Passer les paramètres ici
+
+    const [soins] = await rawDb.execute(`
+        SELECT
+         id,
+         'Soins' AS type,
+         date AS date,
+         nom AS nom,
+         prenom AS prenom,
+         devise AS devise,
+         totalEnDinars AS montant_da,
+         numPasseport AS reference,
+         code_siege
+        FROM soins_a_letranger
+        ${whereString}
+    `, params); // Passer les paramètres ici
+
+    const allTransactions = [...allocations, ...fraisMissions, ...soins]
+      .sort((a, b) => new Date(b.date) - new Date(a.date));
+
+    res.json(allTransactions);
+
+  } catch (err) {
+    console.error('Erreur lors de la récupération des transactions combinées:', err);
+    res.status(500).json({ message: 'Erreur serveur lors de la récupération des transactions.' });
+  }
 });
 // DELETE pour les allocations touristiques
 app.delete('/api/allocations/:id', async (req, res) => {
@@ -250,6 +330,57 @@ app.delete('/api/soins/:id', async (req, res) => {
   }
 });
 
+
+// server.js
+
+// ... (vos imports Express, db/rawDb, body-parser, etc.) ...
+
+// Assurez-vous d'avoir body-parser pour traiter les requêtes POST
+// const bodyParser = require('body-parser');
+// app.use(bodyParser.json());
+// Si vous utilisez Express 4.16+, vous pouvez faire :
+// app.use(express.json());
+
+// server.js
+
+// ... (vos imports Express, db/rawDb, bcrypt, etc.) ...
+// Assurez-vous d'avoir body-parser ou express.json() configuré :
+// app.use(express.json());
+
+
+// Nouvelle route POST pour l'enregistrement/pseudo-connexion
+app.post('/api/simple-login', async (req, res) => {
+  const { username, password, code_siege } = req.body; // <-- Maintenant 'username' au lieu de 'nom' et 'prenom'
+
+  if (!username || !password || !code_siege) {
+    return res.status(400).json({ message: 'Tous les champs (Nom d\'utilisateur, Mot de passe, Code Siège) sont requis.' });
+  }
+
+  try {
+    // Hasher le mot de passe avant de le stocker
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    const [result] = await rawDb.execute(
+      // Mettre à jour la table 'users' pour utiliser 'username'
+      'INSERT INTO users (username, password, code_siege, is_admin) VALUES (?, ?, ?, FALSE)', // is_admin à FALSE par défaut
+      [username, hashedPassword, code_siege]
+    );
+
+    res.status(201).json({ message: 'Informations utilisateur enregistrées avec succès.', userId: result.insertId });
+
+  } catch (error) {
+    console.error('Erreur lors de l\'enregistrement des informations utilisateur:', error);
+    // Gérer l'erreur si l'utilisateur (username) existe déjà
+    if (error.code === 'ER_DUP_ENTRY') { // Code d'erreur MySQL pour doublon
+        return res.status(409).json({ message: 'Ce nom d\'utilisateur existe déjà. Veuillez en choisir un autre.' });
+    }
+    res.status(500).json({ message: 'Erreur serveur lors de l\'enregistrement.' });
+  }
+});
+
+// ... (le reste de vos routes existantes) ...
+
+// ... (le reste de vos routes existantes, y compris /api/transactions que nous venons de simplifier) ...
 app.listen(port, () => {
   console.log(`Serveur backend démarré sur le port ${port}`);
 });
