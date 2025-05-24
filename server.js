@@ -4,6 +4,9 @@ const mysql = require('mysql2');
 const app = express();
 const port = 5000;
 const bcrypt = require('bcrypt'); // Pour le hachage des mots de passe
+const { PDFDocument, rgb, StandardFonts, PageSizes } = require('pdf-lib');
+const fs = require('node:fs/promises'); // Pour lire le fichier image
+const path = require('node:path'); // Pour construire les chemins de fichiers
 app.use(cors());
 app.use(express.json());
 
@@ -379,7 +382,345 @@ app.post('/api/simple-login', async (req, res) => {
 });
 
 // ... (le reste de vos routes existantes) ...
+// --- NOUVELLE ROUTE POUR LA PAGE ENCAISSEMENT ---
+app.get('/api/encaissement/:codeSiege', async (req, res) => {
+    const { codeSiege } = req.params;
+    const today = new Date().toISOString().slice(0, 10); // Format YYYY-MM-DD
 
+    try {
+        const devises = ['EUR', 'USD', 'GBP', 'CAD', 'CHF', 'JPY', 'SAR', 'AED', 'KWD', 'SEK', 'DKK', 'NOK'];
+        let resultsForFrontend = [];
+
+        for (const devise of devises) {
+            // 1. Récupérer l'ancien solde initial pour cette devise et ce siège
+            const [initialSoldeResult] = await rawDb.execute(
+                `SELECT montant_initial FROM soldes_initiaux_devises
+                 WHERE code_siege = ? AND devise = ?`,
+                [codeSiege, devise]
+            );
+            const ancienSolde = initialSoldeResult.length > 0 ? parseFloat(initialSoldeResult[0].montant_initial) : 0.00;
+
+            // 2. Calculer la somme des allocations touristiques pour la journée
+            const [sumAllocations] = await rawDb.execute(
+                `SELECT COALESCE(SUM(coursVenteDevise), 0) AS total
+                 FROM allocations_touristiques
+                 WHERE code_siege = ? AND devise = ? AND DATE(date) = ?`,
+                [codeSiege, devise, today]
+            );
+            const montantAllocationsJour = parseFloat(sumAllocations[0].total);
+
+            // 3. Calculer la somme des frais de missions pour la journée
+            // Assurez-vous que votre table `frais_de_missions` a bien un champ `montant_devise`
+            const [sumFraisMissions] = await rawDb.execute(
+                `SELECT COALESCE(SUM(coursVenteDevise), 0) AS total
+                 FROM frais_de_missions
+                 WHERE code_siege = ? AND devise = ? AND DATE(date) = ?`,
+                [codeSiege, devise, today]
+            );
+            const montantFraisMissionsJour = parseFloat(sumFraisMissions[0].total);
+
+            // 4. Calculer la somme des soins à l'étranger pour la journée
+            // Assurez-vous que votre table `soins_a_letranger` a bien un champ `montant_devise`
+            const [sumSoins] = await rawDb.execute(
+                `SELECT COALESCE(SUM(coursVenteDevise), 0) AS total
+                 FROM soins_a_letranger
+                 WHERE code_siege = ? AND devise = ? AND DATE(date) = ?`,
+                [codeSiege, devise, today]
+            );
+            const montantSoinsJour = parseFloat(sumSoins[0].total);
+
+            // 5. Calculer le nouveau solde pour la journée
+            const nouveauSolde = ancienSolde - (montantAllocationsJour + montantFraisMissionsJour + montantSoinsJour);
+
+            resultsForFrontend.push({
+                devise: devise,
+                ancien_solde: ancienSolde.toFixed(2),
+                montant_allocations_jour: montantAllocationsJour.toFixed(2),
+                montant_frais_missions_jour: montantFraisMissionsJour.toFixed(2),
+                montant_soins_jour: montantSoinsJour.toFixed(2),
+                nouveau_solde: nouveauSolde.toFixed(2)
+            });
+        }
+        res.status(200).json(resultsForFrontend);
+
+    } catch (error) {
+        console.error('Erreur lors de la récupération des données d\'encaissement:', error);
+        res.status(500).json({ message: 'Erreur serveur lors de la récupération des données d\'encaissement.' });
+    }
+});
+
+// Fonction utilitaire pour générer un PDF de rapport
+async function generateTransactionReportPdf(transactionData, typeTransaction, siegeCode) {
+    const pdfDoc = await PDFDocument.create();
+    const page = pdfDoc.addPage(PageSizes.A4); // A4 Landscape si vous préférez, mais Portrait est plus standard pour des rapports comme ça.
+
+    const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+    const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+
+    // Charger le logo
+    let logoImageBytes;
+    try {
+        const logoPath = path.join(__dirname, 'assets', 'logoBA.png'); // Ajustez 'assets' si votre dossier est ailleurs
+        logoImageBytes = await fs.readFile(logoPath);
+    } catch (error) {
+        console.error("Erreur lors du chargement du logo:", error);
+        // Gérer l'absence de logo (par exemple, ne pas l'afficher ou utiliser un fallback)
+    }
+
+    let logoImage = null;
+    if (logoImageBytes) {
+        try {
+            logoImage = await pdfDoc.embedPng(logoImageBytes);
+        } catch (error) {
+            console.error("Erreur lors de l'intégration du logo JPG:", error);
+        }
+    }
+
+    const {
+        nom, prenom, nombreAccompagnant, date, profession, paysDestination,
+        devise, coursVenteDevise, coursVenteDinars, totalEnDinars, commission
+    } = transactionData;
+
+    // Helper pour gérer les valeurs manquantes
+    const getOrDefault = (value) => (value !== undefined && value !== null ? value : '/');
+
+    // --- En-tête du rapport ---
+    const headerY = page.getHeight() - 50;
+    const paddingX = 50;
+
+    if (logoImage) {
+        const logoDims = logoImage.scale(0.1); // Ajustez l'échelle selon la taille de votre logo
+        page.drawImage(logoImage, {
+            x: paddingX,
+            y: headerY - logoDims.height / 2,
+            width: logoDims.width,
+            height: logoDims.height,
+        });
+    }
+
+    // Code Siège
+    page.drawText(`Siège: ${getOrDefault(siegeCode)}`, {
+        x: page.getWidth() - paddingX - 100, // Ajustez la position
+        y: headerY,
+        font: fontBold,
+        size: 12,
+        color: rgb(0, 0, 0),
+    });
+
+    // Titre du rapport
+    page.drawText('Autorisation de Sortie des Devises', {
+        x: paddingX,
+        y: headerY - 50,
+        font: fontBold,
+        size: 20,
+        color: rgb(0, 0, 0),
+    });
+
+    // --- Informations de la transaction ---
+    let currentY = headerY - 120; // Commencez plus bas pour les infos
+
+    page.drawText(`Mr/Mme/Mlle: ${getOrDefault(nom)} ${getOrDefault(prenom)}`, {
+        x: paddingX, y: currentY, font, size: 12,
+    });
+    currentY -= 20;
+
+    page.drawText(`Accompagné(e) de: ${getOrDefault(nombreAccompagnant)}`, {
+        x: paddingX, y: currentY, font, size: 12,
+    });
+    currentY -= 20;
+
+    // Date de l'enregistrement du formulaire (date de la transaction)
+    const formattedDate = date ? new Date(date).toLocaleDateString('fr-FR') : '/';
+    page.drawText(`Délivré le: ${formattedDate}`, {
+        x: paddingX, y: currentY, font, size: 12,
+    });
+    currentY -= 20;
+
+    page.drawText(`Profession: ${getOrDefault(profession)}`, {
+        x: paddingX, y: currentY, font, size: 12,
+    });
+    currentY -= 20;
+
+    page.drawText(`Destination: ${getOrDefault(paysDestination)}`, {
+        x: paddingX, y: currentY, font, size: 12,
+    });
+    currentY -= 20;
+
+    // Motif de la transaction
+    let motif = '/';
+    switch (typeTransaction) {
+        case 'allocation':
+            motif = 'Allocation Touristique';
+            break;
+        case 'frais_mission':
+            motif = 'Frais de Mission';
+            break;
+        case 'soins_etranger':
+            motif = 'Soins à l\'Étranger';
+            break;
+        default:
+            motif = 'Non spécifié';
+    }
+    page.drawText(`Motif: ${motif}`, {
+        x: paddingX, y: currentY, font, size: 12,
+    });
+    currentY -= 40; // Espace avant le tableau
+
+    // --- Tableau Devise et Montant Devise ---
+    const table1Y = currentY;
+    const table1X = paddingX;
+    const colWidth1_1 = 150;
+    const colWidth1_2 = 150;
+    const rowHeight = 25;
+    const lineHeight = 15;
+    const fontSize = 11;
+
+    // Headers
+    page.drawText('Devise', { x: table1X + 5, y: table1Y - lineHeight, font: fontBold, size: fontSize });
+    page.drawText('Montant Devise', { x: table1X + colWidth1_1 + 5, y: table1Y - lineHeight, font: fontBold, size: fontSize });
+
+    // Lignes du tableau
+    page.drawLine({
+        start: { x: table1X, y: table1Y - rowHeight },
+        end: { x: table1X + colWidth1_1 + colWidth1_2, y: table1Y - rowHeight },
+        color: rgb(0.5, 0.5, 0.5),
+        thickness: 1,
+    });
+
+    currentY = table1Y - rowHeight - 5;
+    page.drawText(getOrDefault(devise), { x: table1X + 5, y: currentY - lineHeight, font, size: fontSize });
+    page.drawText(getOrDefault(parseFloat(coursVenteDevise).toFixed(2)), { x: table1X + colWidth1_1 + 5, y: currentY - lineHeight, font, size: fontSize });
+    currentY -= (rowHeight + 5);
+
+    page.drawLine({
+        start: { x: table1X, y: currentY + lineHeight + 5},
+        end: { x: table1X + colWidth1_1 + colWidth1_2, y: currentY + lineHeight + 5},
+        color: rgb(0.5, 0.5, 0.5),
+        thickness: 1,
+    });
+
+    // Dessiner les bordures du tableau 1
+    page.drawRectangle({
+        x: table1X, y: table1Y - rowHeight - (rowHeight * 1),
+        width: colWidth1_1 + colWidth1_2, height: rowHeight * 2, // Hauteur pour entête + 1 ligne de données
+        borderColor: rgb(0.5, 0.5, 0.5),
+        borderWidth: 1,
+    });
+    page.drawLine({
+        start: { x: table1X + colWidth1_1, y: table1Y - rowHeight - (rowHeight * 1) },
+        end: { x: table1X + colWidth1_1, y: table1Y },
+        color: rgb(0.5, 0.5, 0.5),
+        thickness: 1,
+    });
+
+
+    // --- Tableau Contre Valeur, Commission, Total DA ---
+    currentY -= 40; // Espace après le premier tableau
+    const table2Y = currentY;
+    const table2X = paddingX;
+    const colWidth2_1 = 150;
+    const colWidth2_2 = 150;
+    const colWidth2_3 = 150;
+
+    // Headers
+    page.drawText('Contre valeur en DA', { x: table2X + 5, y: table2Y - lineHeight, font: fontBold, size: fontSize });
+    page.drawText('Commission en DA', { x: table2X + colWidth2_1 + 5, y: table2Y - lineHeight, font: fontBold, size: fontSize });
+    page.drawText('Total en DA', { x: table2X + colWidth2_1 + colWidth2_2 + 5, y: table2Y - lineHeight, font: fontBold, size: fontSize });
+
+    // Lignes du tableau
+    page.drawLine({
+        start: { x: table2X, y: table2Y - rowHeight },
+        end: { x: table2X + colWidth2_1 + colWidth2_2 + colWidth2_3, y: table2Y - rowHeight },
+        color: rgb(0.5, 0.5, 0.5),
+        thickness: 1,
+    });
+
+    currentY = table2Y - rowHeight - 5;
+    page.drawText(getOrDefault(parseFloat(coursVenteDinars).toFixed(2)), { x: table2X + 5, y: currentY - lineHeight, font, size: fontSize });
+    page.drawText(getOrDefault(parseFloat(commission).toFixed(2)), { x: table2X + colWidth2_1 + 5, y: currentY - lineHeight, font, size: fontSize });
+    page.drawText(getOrDefault(parseFloat(totalEnDinars).toFixed(2)), { x: table2X + colWidth2_1 + colWidth2_2 + 5, y: currentY - lineHeight, font, size: fontSize });
+    currentY -= (rowHeight + 5);
+
+    page.drawLine({
+        start: { x: table2X, y: currentY + lineHeight + 5},
+        end: { x: table2X + colWidth2_1 + colWidth2_2 + colWidth2_3, y: currentY + lineHeight + 5},
+        color: rgb(0.5, 0.5, 0.5),
+        thickness: 1,
+    });
+
+    // Dessiner les bordures du tableau 2
+    page.drawRectangle({
+        x: table2X, y: table2Y - rowHeight - (rowHeight * 1),
+        width: colWidth2_1 + colWidth2_2 + colWidth2_3, height: rowHeight * 2,
+        borderColor: rgb(0.5, 0.5, 0.5),
+        borderWidth: 1,
+    });
+    page.drawLine({
+        start: { x: table2X + colWidth2_1, y: table2Y - rowHeight - (rowHeight * 1) },
+        end: { x: table2X + colWidth2_1, y: table2Y },
+        color: rgb(0.5, 0.5, 0.5),
+        thickness: 1,
+    });
+    page.drawLine({
+        start: { x: table2X + colWidth2_1 + colWidth2_2, y: table2Y - rowHeight - (rowHeight * 1) },
+        end: { x: table2X + colWidth2_1 + colWidth2_2, y: table2Y },
+        color: rgb(0.5, 0.5, 0.5),
+        thickness: 1,
+    });
+
+
+    // --- Date de la transaction ---
+    currentY -= 40; // Espace après le deuxième tableau
+    page.drawText(`Date de la transaction: ${formattedDate}`, {
+        x: paddingX, y: currentY, font, size: 12,
+    });
+
+    return await pdfDoc.save();
+}
+
+
+// --- Nouvelle route pour générer le rapport PDF ---
+app.get('/api/report/:type/:id', async (req, res) => {
+    const { type, id } = req.params;
+    const { codeSiege } = req.query; // Récupérer le codeSiege depuis les query params
+
+    let tableName;
+    let transactionData;
+
+    switch (type) {
+        case 'allocation':
+            tableName = 'allocations_touristiques';
+            break;
+        case 'frais_mission':
+            tableName = 'frais_de_missions';
+            break;
+        case 'soins_etranger':
+            tableName = 'soins_a_letranger';
+            break;
+        default:
+            return res.status(400).json({ message: 'Type de transaction invalide.' });
+    }
+
+    try {
+        const [rows] = await rawDb.execute(`SELECT * FROM ${tableName} WHERE id = ?`, [id]);
+
+        if (rows.length === 0) {
+            return res.status(404).json({ message: 'Transaction non trouvée.' });
+        }
+        transactionData = rows[0];
+
+        // Générer le PDF
+        const pdfBytes = await generateTransactionReportPdf(transactionData, type, codeSiege); // Passez le codeSiege
+
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `attachment; filename=rapport_${type}_${id}.pdf`);
+        res.send(Buffer.from(pdfBytes));
+
+    } catch (error) {
+        console.error(`Erreur lors de la génération du rapport PDF pour ${type} ID ${id}:`, error);
+        res.status(500).json({ message: `Erreur serveur lors de la génération du rapport PDF.` });
+    }
+});
 // ... (le reste de vos routes existantes, y compris /api/transactions que nous venons de simplifier) ...
 app.listen(port, () => {
   console.log(`Serveur backend démarré sur le port ${port}`);
