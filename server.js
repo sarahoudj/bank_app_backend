@@ -5,17 +5,17 @@ const app = express();
 const port = 5000;
 const bcrypt = require('bcrypt'); // Pour le hachage des mots de passe
 const { PDFDocument, rgb, StandardFonts, PageSizes } = require('pdf-lib');
-const fs = require('node:fs/promises'); // Pour lire le fichier image
-const path = require('node:path'); // Pour construire les chemins de fichiers
+const fs = require('node:fs/promises'); 
+const path = require('node:path'); 
 app.use(cors());
 app.use(express.json());
 
 
 /*let db; // Déclarez db ici
 
-async function startServer() { // Utilisez une fonction async pour gérer la connexion DB
+async function startServer() 
   try {
-    db = await mysql.createConnection({ // Utilisez await ici pour la connexion
+    db = await mysql.createConnection(
       host: 'localhost',
       user: 'root',
       password: '', // Votre mot de passe MySQL
@@ -334,21 +334,6 @@ app.delete('/api/soins/:id', async (req, res) => {
 });
 
 
-// server.js
-
-// ... (vos imports Express, db/rawDb, body-parser, etc.) ...
-
-// Assurez-vous d'avoir body-parser pour traiter les requêtes POST
-// const bodyParser = require('body-parser');
-// app.use(bodyParser.json());
-// Si vous utilisez Express 4.16+, vous pouvez faire :
-// app.use(express.json());
-
-// server.js
-
-// ... (vos imports Express, db/rawDb, bcrypt, etc.) ...
-// Assurez-vous d'avoir body-parser ou express.json() configuré :
-// app.use(express.json());
 
 
 // Nouvelle route POST pour l'enregistrement/pseudo-connexion
@@ -452,7 +437,7 @@ app.get('/api/encaissement/:codeSiege', async (req, res) => {
 // Fonction utilitaire pour générer un PDF de rapport
 async function generateTransactionReportPdf(transactionData, typeTransaction, siegeCode) {
     const pdfDoc = await PDFDocument.create();
-    const page = pdfDoc.addPage(PageSizes.A4); // A4 Landscape si vous préférez, mais Portrait est plus standard pour des rapports comme ça.
+    const page = pdfDoc.addPage(PageSizes.A4); 
 
     const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
     const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
@@ -460,11 +445,11 @@ async function generateTransactionReportPdf(transactionData, typeTransaction, si
     // Charger le logo
     let logoImageBytes;
     try {
-        const logoPath = path.join(__dirname, 'assets', 'logoBA.png'); // Ajustez 'assets' si votre dossier est ailleurs
+        const logoPath = path.join(__dirname, 'assets', 'logoBA.png'); 
         logoImageBytes = await fs.readFile(logoPath);
     } catch (error) {
         console.error("Erreur lors du chargement du logo:", error);
-        // Gérer l'absence de logo (par exemple, ne pas l'afficher ou utiliser un fallback)
+        // Gérer l'absence de logo 
     }
 
     let logoImage = null;
@@ -489,7 +474,7 @@ async function generateTransactionReportPdf(transactionData, typeTransaction, si
     const paddingX = 50;
 
     if (logoImage) {
-        const logoDims = logoImage.scale(0.1); // Ajustez l'échelle selon la taille de votre logo
+        const logoDims = logoImage.scale(0.1); 
         page.drawImage(logoImage, {
             x: paddingX,
             y: headerY - logoDims.height / 2,
@@ -500,7 +485,7 @@ async function generateTransactionReportPdf(transactionData, typeTransaction, si
 
     // Code Siège
     page.drawText(`Siège: ${getOrDefault(siegeCode)}`, {
-        x: page.getWidth() - paddingX - 100, // Ajustez la position
+        x: page.getWidth() - paddingX - 100,
         y: headerY,
         font: fontBold,
         size: 12,
@@ -517,7 +502,7 @@ async function generateTransactionReportPdf(transactionData, typeTransaction, si
     });
 
     // --- Informations de la transaction ---
-    let currentY = headerY - 120; // Commencez plus bas pour les infos
+    let currentY = headerY - 120; 
 
     page.drawText(`Mr/Mme/Mlle: ${getOrDefault(nom)} ${getOrDefault(prenom)}`, {
         x: paddingX, y: currentY, font, size: 12,
@@ -710,7 +695,7 @@ app.get('/api/report/:type/:id', async (req, res) => {
         transactionData = rows[0];
 
         // Générer le PDF
-        const pdfBytes = await generateTransactionReportPdf(transactionData, type, codeSiege); // Passez le codeSiege
+        const pdfBytes = await generateTransactionReportPdf(transactionData, type, codeSiege); 
 
         res.setHeader('Content-Type', 'application/pdf');
         res.setHeader('Content-Disposition', `attachment; filename=rapport_${type}_${id}.pdf`);
@@ -721,7 +706,7 @@ app.get('/api/report/:type/:id', async (req, res) => {
         res.status(500).json({ message: `Erreur serveur lors de la génération du rapport PDF.` });
     }
 });
-// ... (le reste de vos routes existantes, y compris /api/transactions que nous venons de simplifier) ...
+
 app.listen(port, () => {
   console.log(`Serveur backend démarré sur le port ${port}`);
 });
